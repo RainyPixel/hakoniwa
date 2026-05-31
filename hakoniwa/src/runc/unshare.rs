@@ -247,14 +247,13 @@ fn apply_fs_operations(container: &Container) -> Result<()> {
     for op in &container.get_fs_operations() {
         match op {
             FsOperation::WriteFile(file) => {
-                sys::fwrite(&file.target, &file.contents)?;
+                sys::fwrite_nofollow(&file.target, &file.contents)?;
             }
             FsOperation::MakeDir(dir) => {
-                sys::mkdir_p(&dir.target)?;
-                sys::chmod(&dir.target, dir.mode)?;
+                sys::mkdir_p_nofollow(&dir.target, dir.mode)?;
             }
             FsOperation::MakeSymlink(symlink) => {
-                sys::symlink(&symlink.original, &symlink.link)?;
+                sys::symlink_nofollow(&symlink.original, &symlink.link)?;
             }
         }
     }

@@ -70,7 +70,7 @@ jobs:
       - name: Install libseccomp
         uses: ./.github/actions/setup
         with:
-          version: main
+          version: v2.6.0
           link-type: static
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -91,10 +91,16 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     needs:
       - dist
       - dist-musl
     steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           name: hakoniwa-x86_64-unknown-linux-gnu
@@ -111,8 +117,23 @@ jobs:
         with:
           name: hakoniwa-aarch64-unknown-linux-musl
           path: dist
+      - name: Generate release checksums
+        run: |
+          cp install.sh dist/install.sh
+          (cd dist && sha256sum install.sh *.tar.gz > SHA256SUMS)
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/install.sh
+            dist/SHA256SUMS
       - name: Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/install.sh
+            dist/SHA256SUMS
+          body_path: dist/SHA256SUMS
           draft: true
