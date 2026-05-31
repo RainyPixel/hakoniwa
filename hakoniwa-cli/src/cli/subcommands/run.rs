@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use clap::{Args, ValueHint};
 use nix::unistd::{Uid, User};
 use parse_size::parse_size;
@@ -9,7 +9,7 @@ use std::str::{self, FromStr};
 use crate::cli::{argparse, pathsearch};
 use crate::{config, seccomp, slirp};
 use hakoniwa::{
-    Command, Container, Namespace, Pasta, Rlimit, Runctl, RustSlirp, cgroups, landlock,
+    cgroups, landlock, Command, Container, Namespace, Pasta, Rlimit, Runctl, RustSlirp,
 };
 
 const SHELL: &str = "/bin/sh";
@@ -321,33 +321,8 @@ impl RunCommand {
 
         // CFG: landlock
         if let Some(landlock) = cfg.landlock {
-            let mut ruleset = landlock::Ruleset::default();
-            for resource in landlock.resources {
-                let res = Self::str_to_landlock_resource(&resource.rtype)
-                    .map_err(|e| anyhow!("--config: landlock: {e}"))?;
-                if resource.unrestrict {
-                    ruleset.unrestrict(res);
-                } else {
-                    ruleset.restrict(res, landlock::CompatMode::Enforce);
-                }
-            }
-
-            for rule in landlock.fs {
-                let access = landlock::FsAccess::from_str(&rule.access)
-                    .map_err(|e| anyhow!("--config: landlock: {e}"))?;
-                ruleset.allow_path(&rule.path, access);
-            }
-
-            for rule in landlock.net {
-                let access = Self::str_to_landlock_net_access(&rule.access)
-                    .map_err(|e| anyhow!("--config: landlock: {e}"))?;
-                match access {
-                    landlock::NetAccess::TCP_BIND => ruleset.allow_tcp_bind(rule.port),
-                    landlock::NetAccess::TCP_CONNECT => ruleset.allow_tcp_connect(rule.port),
-                    _ => unreachable!("RunCommand::execute_cfg"),
-                };
-            }
-
+            let ruleset = Self::build_cfg_landlock_ruleset(landlock)
+                .map_err(|e| anyhow!("--config: landlock: {e}"))?;
             container.landlock_ruleset(ruleset);
         }
 
@@ -719,6 +694,56 @@ impl RunCommand {
         Ok(status.code)
     }
 
+    fn build_cfg_landlock_ruleset(landlock: config::CfgLandlock) -> Result<landlock::Ruleset> {
+        let mut ruleset = landlock::Ruleset::default();
+        let mut explicit_resources = vec![];
+
+        for resource in landlock.resources {
+            let res = Self::str_to_landlock_resource(&resource.rtype)?;
+            explicit_resources.push(res);
+            if resource.unrestrict {
+                ruleset.unrestrict(res);
+            } else {
+                ruleset.restrict(res, landlock::CompatMode::Enforce);
+            }
+        }
+
+        if !landlock.fs.is_empty() && !explicit_resources.contains(&landlock::Resource::FS) {
+            ruleset.restrict(landlock::Resource::FS, landlock::CompatMode::Enforce);
+        }
+        for rule in landlock.fs {
+            let access = landlock::FsAccess::from_str(&rule.access)?;
+            ruleset.allow_path(&rule.path, access);
+        }
+
+        for rule in landlock.net {
+            let access = Self::str_to_landlock_net_access(&rule.access)?;
+            match access {
+                landlock::NetAccess::TCP_BIND => {
+                    if !explicit_resources.contains(&landlock::Resource::NET_TCP_BIND) {
+                        ruleset.restrict(
+                            landlock::Resource::NET_TCP_BIND,
+                            landlock::CompatMode::Enforce,
+                        );
+                    }
+                    ruleset.allow_tcp_bind(rule.port)
+                }
+                landlock::NetAccess::TCP_CONNECT => {
+                    if !explicit_resources.contains(&landlock::Resource::NET_TCP_CONNECT) {
+                        ruleset.restrict(
+                            landlock::Resource::NET_TCP_CONNECT,
+                            landlock::CompatMode::Enforce,
+                        );
+                    }
+                    ruleset.allow_tcp_connect(rule.port)
+                }
+                _ => unreachable!("RunCommand::build_cfg_landlock_ruleset"),
+            };
+        }
+
+        Ok(ruleset)
+    }
+
     fn configure_userns(container: &mut Container, mode: &str) -> Result<()> {
         match mode {
             "auto" => {
@@ -853,5 +878,71 @@ impl RunCommand {
             }
         }
         Ok(idmaps)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn landlock_with_rules(
+        resources: Vec<config::CfgLandlockResource>,
+        fs: Vec<config::CfgLandlockFsRule>,
+        net: Vec<config::CfgLandlockNetRule>,
+    ) -> config::CfgLandlock {
+        config::CfgLandlock { resources, fs, net }
+    }
+
+    #[test]
+    fn cfg_landlock_infers_fs_restriction_from_fs_rules() {
+        let ruleset = RunCommand::build_cfg_landlock_ruleset(landlock_with_rules(
+            vec![],
+            vec![config::CfgLandlockFsRule {
+                path: "/bin".to_string(),
+                access: "r-x".to_string(),
+            }],
+            vec![],
+        ))
+        .expect("landlock ruleset should build");
+
+        assert!(ruleset.is_restricted(landlock::Resource::FS));
+    }
+
+    #[test]
+    fn cfg_landlock_infers_matching_net_restriction_from_net_rules() {
+        let ruleset = RunCommand::build_cfg_landlock_ruleset(landlock_with_rules(
+            vec![config::CfgLandlockResource {
+                rtype: "fs".to_string(),
+                unrestrict: false,
+            }],
+            vec![],
+            vec![config::CfgLandlockNetRule {
+                port: 443,
+                access: "tcp.connect".to_string(),
+            }],
+        ))
+        .expect("landlock ruleset should build");
+
+        assert!(ruleset.is_restricted(landlock::Resource::FS));
+        assert!(ruleset.is_restricted(landlock::Resource::NET_TCP_CONNECT));
+        assert!(!ruleset.is_restricted(landlock::Resource::NET_TCP_BIND));
+    }
+
+    #[test]
+    fn cfg_landlock_respects_explicit_unrestrict_for_rule_resource() {
+        let ruleset = RunCommand::build_cfg_landlock_ruleset(landlock_with_rules(
+            vec![config::CfgLandlockResource {
+                rtype: "fs".to_string(),
+                unrestrict: true,
+            }],
+            vec![config::CfgLandlockFsRule {
+                path: "/bin".to_string(),
+                access: "r-x".to_string(),
+            }],
+            vec![],
+        ))
+        .expect("landlock ruleset should build");
+
+        assert!(!ruleset.is_restricted(landlock::Resource::FS));
     }
 }

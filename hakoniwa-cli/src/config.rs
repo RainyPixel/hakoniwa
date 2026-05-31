@@ -6,7 +6,7 @@ use minijinja::Environment;
 use std::fs;
 use std::path::Path;
 
-use crate::config::template::*;
+pub(crate) use crate::config::template::*;
 
 pub(crate) fn load(path: &str) -> Result<CfgConfig> {
     // Template Renderer

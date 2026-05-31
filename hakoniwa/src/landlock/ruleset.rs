@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 
 use super::{FsAccess, FsRule, NetAccess, NetRule};
 
@@ -50,6 +50,11 @@ impl Ruleset {
     pub fn restrict(&mut self, resource: Resource, mode: CompatMode) -> &mut Self {
         self.restrictions.insert(resource, mode);
         self
+    }
+
+    /// Returns true when the ruleset restricts RESOURCE.
+    pub fn is_restricted(&self, resource: Resource) -> bool {
+        self.restrictions.contains_key(&resource)
     }
 
     /// Allow access to files beneath PATH with given mode.
