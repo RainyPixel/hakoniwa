@@ -75,6 +75,9 @@ impl Ruleset {
             mode,
         };
         self.fs_rules.insert(path, rule);
+        self.restrictions
+            .entry(Resource::FS)
+            .or_insert(CompatMode::Enforce);
         self
     }
 
@@ -106,5 +109,35 @@ impl Ruleset {
         let mut values: Vec<_> = self.fs_rules.values().collect();
         values.sort_by(|a, b| a.path.cmp(&b.path));
         values
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_path_enables_fs_restriction() {
+        let mut ruleset = Ruleset::default();
+
+        ruleset.allow_path("/tmp", FsAccess::R);
+
+        assert_eq!(
+            ruleset.restrictions.get(&Resource::FS),
+            Some(&CompatMode::Enforce)
+        );
+    }
+
+    #[test]
+    fn allow_path_preserves_existing_fs_compat_mode() {
+        let mut ruleset = Ruleset::default();
+
+        ruleset.restrict(Resource::FS, CompatMode::Relax);
+        ruleset.allow_path("/tmp", FsAccess::R);
+
+        assert_eq!(
+            ruleset.restrictions.get(&Resource::FS),
+            Some(&CompatMode::Relax)
+        );
     }
 }
